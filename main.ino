@@ -2,17 +2,22 @@
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <time.h>
 #include <WiFiClientSecureBearSSL.h>
+#define TIME_ZONE -3
 
 const int ledPin = 2;
 const int inputPin = 5;
 
-const int MQTT_CONNECTION_DELAY= 10000;
-const int MQTT_PORT = 8883; // TLS
+const int MQTT_CONNECTION_DELAY= 5000;
+const int MQTT_PORT = 8883; // MQTT = 8883, HTTPS = 8443, HTTP = 443
+const char* MQTT_CLIENT_CERTIFICATE_PATH = "/root-CA.crt.der";
 const char* MQTT_CERTIFICATE_PATH = "/home_sensor.cert.der";
 const char* MQTT_PRIVATE_KEY_PATH = "/home_sensor.private.der";
-const char* MQTT_TOPIC = "sensor/presence";
+const char* MQTT_TOPIC = "sdk/test/js";
 const int MAX_MQTT_RETRIES = 30;
+
+const char* MQTT_CLIENT_ID = "basicPubSub";
 
 const char* CONFIG_FILE_PATH = "/config.json";
 
@@ -31,6 +36,27 @@ unsigned long lastPublishTime = 0;
 
 std::unique_ptr<BearSSL::WiFiClientSecure> wifiClientSecure(new BearSSL::WiFiClientSecure());
 PubSubClient client(*wifiClientSecure);
+
+time_t now;
+time_t nowish = 1510592825;
+
+void NTPConnect(void)
+{
+    Serial.print("Setting time using SNTP");
+    configTime(TIME_ZONE * 3600, 0 * 3600, "pool.ntp.org", "time.nist.gov");
+    now = time(nullptr);
+    while (now < nowish)
+    {
+        delay(500);
+        Serial.print(".");
+        now = time(nullptr);
+    }
+    Serial.println("done!");
+    struct tm timeinfo;
+    gmtime_r(&now, &timeinfo);
+    Serial.print("Current time: ");
+    Serial.print(asctime(&timeinfo));
+}
 
 DynamicJsonDocument* initializeConfig() {
     File configFile = SPIFFS.open(CONFIG_FILE_PATH, "r");
@@ -87,62 +113,86 @@ void awaitWifiConnection() {
     Serial.println(WiFi.localIP());
 }
 
-int loadCertificate() {
-    File file = SPIFFS.open(MQTT_CERTIFICATE_PATH, "r");
-    if (!file) {
+int authMqtt() {
+    // Root certificate
+    File certFile = SPIFFS.open(MQTT_CERTIFICATE_PATH, "r");
+    if (!certFile) {
         Serial.println("Failed to open certificate file");
         return 1;
     }
+    size_t certSize = certFile.size();
+    std::unique_ptr<uint8_t[]> certBuf(new uint8_t[certSize]);
+    certFile.readBytes(reinterpret_cast<char*>(certBuf.get()), certSize);
+    BearSSL::X509List cert(certBuf.get(), certSize);
+    certFile.close();
 
-    size_t size = file.size();
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[size]);
-    file.readBytes(reinterpret_cast<char*>(buf.get()), size);
-    BearSSL::X509List cert(buf.get(), size);
-    wifiClientSecure->setTrustAnchors(&cert);
-    file.close();
-    return 0;
-}
+    // Client certificate
+    File clientCertFile = SPIFFS.open(MQTT_CLIENT_CERTIFICATE_PATH, "r");
+    if (!clientCertFile) {
+        Serial.println("Failed to open client certificate file");
+        return 1;
+    }
+    size_t clientCertSize = clientCertFile.size();
+    std::unique_ptr<uint8_t[]> clientCertBuf(new uint8_t[clientCertSize]);
+    clientCertFile.readBytes(reinterpret_cast<char*>(clientCertBuf.get()), clientCertSize);
+    BearSSL::X509List clientCert(clientCertBuf.get(), clientCertSize);
+    clientCertFile.close();
 
-int loadPrivateKey() {
-    File file = SPIFFS.open(MQTT_PRIVATE_KEY_PATH, "r");
-    if (!file) {
+    // Private key
+    File privateKeyFile = SPIFFS.open(MQTT_PRIVATE_KEY_PATH, "r");
+    if (!privateKeyFile) {
         Serial.println("Failed to open private key file");
         return 1;
     }
+    size_t privateKeySize = privateKeyFile.size();
+    std::unique_ptr<uint8_t[]> privateKeyBuf(new uint8_t[privateKeySize]);
+    privateKeyFile.readBytes(reinterpret_cast<char*>(privateKeyBuf.get()), privateKeySize);
+    BearSSL::PrivateKey privateKey(privateKeyBuf.get(), privateKeySize);
+    privateKeyFile.close();
 
-    size_t size = file.size();
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[size]);
-    file.readBytes(reinterpret_cast<char*>(buf.get()), size);
-    wifiClientSecure->setPrivateKey(buf.get(), size);
-    file.close();
+    NTPConnect();
+
+    Serial.printf("CACert size: %d\n", certSize);
+    Serial.printf("Client cert size: %d\n", clientCertSize);
+    Serial.printf("Private key size: %d\n", privateKeySize);
+    wifiClientSecure->setTrustAnchors(&cert);
+    wifiClientSecure->setClientRSACert(&clientCert, &privateKey);
+
     return 0;
 }
 
-int connectMqtt() {
+int setupMqtt() {
     if (!mqttServer) {
         Serial.println("MQTT server not configured");
         return 1;
     }
 
-    if (loadCertificate() || loadPrivateKey()) {
+    if (authMqtt()) {
         Serial.println("Failed to load MQTT certificate or private key");
         return 1;
     }
 
-    int retries = 0;
     client.setServer(mqttServer.c_str(), MQTT_PORT);
+    return 0;
+}
+
+int connectMqtt() {
+    int retries = 0;
+    Serial.print("Connecting to MQTT server at ");
+    Serial.println(mqttServer);
     while (!client.connected() && retries < MAX_MQTT_RETRIES) {
-        if (client.connect("ESP8266Client")) {
-            Serial.println("Connected to MQTT server");
+        if (client.connect(MQTT_CLIENT_ID)) {
+            Serial.println();
+            Serial.println("Connected.");
             return 0;
         } else {
-            Serial.printf("Failed to connect to MQTT server. Retrying in %d seconds...", MQTT_CONNECTION_DELAY);
-            Serial.println();
+            Serial.print(".");
             delay(MQTT_CONNECTION_DELAY);
             retries++;
         }
     }
 
+    Serial.println();
     Serial.println("Max MQTT connection retries reached. Aborting...");
 
     return 1;
@@ -174,16 +224,20 @@ void setup() {
 
     ssid = (*config)["ssid"].as<String>();
     password = (*config)["password"].as<String>();
-    mqttServer = (*config)["mqttServer"].as<String>();
+    mqttServer = (*config)["mqttServer"].as<String>();;
+    Serial.print("MQTT Server: ");
+    Serial.println(mqttServer);
     delete config;
 
     pinMode(ledPin, OUTPUT);
     pinMode(inputPin, INPUT);
 
+    WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), password.c_str());
     Serial.print("Connecting");
     awaitWifiConnection();
 
+    setupMqtt();
     connectMqtt();
 }
 
@@ -193,32 +247,31 @@ void loop() {
         awaitWifiConnection();
     }
 
+    now = time(nullptr);
+
     if (!client.connected()) {
         Serial.println("MQTT disconnected. Attempting reconnection...");
         connectMqtt();
-    }
-    client.loop();
-
-    if (requests == 0) {
-        client.publish(MQTT_TOPIC, "{\"message\": \"initialized presence loop\"}");
-        requests++;
-    }
-
-    val = digitalRead(inputPin);
-    if (val == HIGH) {
-        digitalWrite(ledPin, HIGH);
-        if (pirState == LOW) {
-            Serial.print("Motion detected: ");
-            Serial.println(++count);
-            publishToMqtt();
-            pirState = HIGH;
-        }
     } else {
-        digitalWrite(ledPin, LOW);
-        if (pirState == HIGH){
-            Serial.print("Motion ended: ");
-            Serial.println(++count);
-            pirState = LOW;
+        Serial.println("MQTT connected. Looping...");
+        client.loop();
+
+        val = digitalRead(inputPin);
+        if (val == HIGH) {
+            digitalWrite(ledPin, HIGH);
+            if (pirState == LOW) {
+                Serial.print("Motion detected: ");
+                Serial.println(++count);
+                publishToMqtt();
+                pirState = HIGH;
+            }
+        } else {
+            digitalWrite(ledPin, LOW);
+            if (pirState == HIGH){
+                Serial.print("Motion ended: ");
+                Serial.println(++count);
+                pirState = LOW;
+            }
         }
     }
 }

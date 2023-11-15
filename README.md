@@ -1,7 +1,8 @@
-# GoogleTest
+# Home Sensor
 
-https://google.github.io/googletest/quickstart-cmake.html
+This is a presence sensor controller built for an ESP8266 module attached to a PIR sensor.
 
-    cmake -S . -B build
-    cmake --build build
-    cd build && ctest
+Fill out the template files and replace *_template with *_secret and place the Arduino libraries in the Arduino folder
+in your local environment.
+
+Create a sketch with main.ino.

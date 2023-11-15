@@ -4,4 +4,4 @@ bin/
 .idea
 .env
 .DS_Store
-
+*secrets.h

@@ -6,7 +6,7 @@ time_t now;
 
 void NTPConnect()
 {
-  time_t nowish = 1510592825;
+  time_t nowish = 1700483110;
   
   Serial.print("Setting time using SNTP");
   configTime(TIME_ZONE * 3600, 0 * 3600, "pool.ntp.org", "time.nist.gov");
